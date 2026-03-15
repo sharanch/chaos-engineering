@@ -15,7 +15,7 @@ kubectl exec -i pg-0 -- psql -U postgres -c "SELECT * FROM k8s_test;"
 
 #The below is for postgress-cluster.yaml
 
-export DB_PASSWORD=$(kubectl get secret my-pg-cluster-app -o jsonpath="{.data.password}" | base64 --decode) -- get password for the cluster
+export DB_PASSWORD=$(kubectl get secret my-pg-cluster-app -o jsonpath="{.data.password}" | base64 --decode)
 
 kubectl exec -it my-pg-cluster-1 -- psql -h 127.0.0.1 -U app_user -d app_db
 

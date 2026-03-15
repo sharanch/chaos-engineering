@@ -1,89 +1,167 @@
-Resilient Data PoC (PostgreSQL HA on K8s)
+# CNPG Chaos Test
 
-A Proof of Concept (PoC) demonstrating a High-Availability (HA) PostgreSQL cluster architecture within Kubernetes. This project focuses on the "Reliability" pillar of SRE—ensuring data persistence and automatic failover in the event of infrastructure failure.
-🚀 Overview
+Automated failover and replication testing for a [CloudNativePG](https://cloudnative-pg.io/) PostgreSQL cluster running on Kubernetes (Minikube).
 
-Running stateful workloads like databases on Kubernetes is notoriously difficult. This project utilizes the CloudNativePG (CNPG) operator to manage the lifecycle of a PostgreSQL cluster, providing:
+---
 
-    Automated Failover: Primary/Replica synchronization with automatic leader election.
+## What it does
 
-    Self-Healing: Automatic recreation of failed replicas.
+Runs an end-to-end chaos test against a CNPG cluster:
 
-    Dynamic Provisioning: Automated management of Persistent Volume Claims (PVCs).
+1. Writes a canary row to the primary pod
+2. Verifies the row has replicated to all replica pods
+3. Hard-kills the primary pod (`--grace-period=0 --force`)
+4. Waits for CNPG to elect a new primary and measures the failover time
+5. Confirms the canary row is intact on the new primary (data integrity check)
+6. Reports the final cluster topology
 
-🛠 Tech Stack
+Each run gets a unique `run_id` (e.g. `chaos-6878`) so you can correlate writes across runs in the `chaos_test` table.
 
-    Orchestration: Kubernetes (Minikube/EKS/GKE)
+---
 
-    Database: PostgreSQL 16
+## Cluster setup
 
-    Operator: CloudNativePG (CNPG)
+The script was built for this CNPG cluster definition:
 
-    Storage: Kubernetes Dynamic Provisioning (Standard StorageClass)
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: my-pg-cluster
+spec:
+  instances: 3        # 1 primary + 2 replicas
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.2
+  storage:
+    size: 1Gi
+    storageClass: standard
+  bootstrap:
+    initdb:
+      database: app_db
+      owner: app_user
+  monitoring:
+    enablePodMonitor: true
+```
 
-🏗 Architecture
+Install the CNPG operator before applying:
 
-The cluster is deployed as a 3-node architecture to ensure quorum:
+```bash
+kubectl apply --server-side -f \
+  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.1.yaml
+```
 
-    1 Primary: Handles all read/write traffic.
+---
 
-    2 Replicas: Maintain hot-standby copies of the data via streaming replication.
+## Prerequisites
 
-Plaintext
+- `kubectl` configured and pointing at your cluster
+- CNPG operator installed
+- Cluster secret `my-pg-cluster-app` present (created automatically by CNPG)
 
-       [ Kubernetes Cluster ]
-                 │
-       ┌─────────┴─────────┐
-       │  CNPG Operator    │ (Controller Loop)
-       └─────────┬─────────┘
-                 │
-   ┌─────────────┼─────────────┐
-   ▼             ▼             ▼
-[Primary]     [Replica]     [Replica]
-  (RW)          (RO)          (RO)
-   │             │             │
- [PVC]         [PVC]         [PVC]
+---
 
-🧪 Chaos Testing (Validation)
+## Usage
 
-To prove the "Resilience" of this setup, the following scenarios were tested:
-1. Primary Node Failure
+```bash
+chmod +x cnpg-chaos-test.sh
 
-    Action: Forcefully deleted the Primary Pod (kubectl delete pod <primary-pod>).
+# Full test — write, replicate, kill, failover, integrity check
+./cnpg-chaos-test.sh
 
-    Observation: The CNPG operator detected the liveness failure, promoted the most up-to-date replica to Primary within seconds, and updated the Service endpoints.
+# Only test replication (no kill)
+./cnpg-chaos-test.sh --skip-kill
 
-    Result: Zero data loss; minimal downtime for write operations.
+# Only test failover (no write/replication check)
+./cnpg-chaos-test.sh --skip-write
 
-2. Storage Persistence
+# Custom cluster or namespace
+CLUSTER=my-pg-cluster NAMESPACE=chatops ./cnpg-chaos-test.sh
+```
 
-    Action: Scaled the cluster to 0 and back to 3.
+### Options
 
-    Observation: Kubernetes re-attached the existing PVCs to the new pods.
+| Flag | Default | Description |
+|---|---|---|
+| `--cluster` | `my-pg-cluster` | CNPG cluster name |
+| `--namespace` | `default` | Kubernetes namespace |
+| `--skip-write` | off | Skip write + replication steps |
+| `--skip-kill` | off | Skip kill + failover steps |
 
-    Result: Data remained intact, proving successful state management.
+---
 
-⚙️ Setup Instructions
+## How primary detection works
 
-    Install the CNPG Operator:
-    Bash
+CNPG automatically labels pods with `cnpg.io/instanceRole=primary` or `replica`. The script uses these labels to find the current primary without hardcoding any pod names:
 
-    kubectl apply -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/main/releases/cnpg-1.22.0.yaml
+```bash
+kubectl get pod \
+  -l "cnpg.io/cluster=my-pg-cluster,cnpg.io/instanceRole=primary" \
+  -o jsonpath='{.items[0].metadata.name}'
+```
 
-    Deploy the Cluster:
-    Bash
+This means the script works correctly even after a failover has already happened and a different pod is now primary.
 
-    kubectl apply -f postgress-cluster.yaml
+---
 
-    Check Status:
-    Bash
+## Password handling
 
-    kubectl get cluster postgres-cluster -w
+CNPG uses `scram-sha-256` auth even for `127.0.0.1` connections inside the pod. The script fetches the password automatically from the cluster secret:
 
-📝 Key SRE Takeaways
+```bash
+DB_PASS=$(kubectl get secret my-pg-cluster-app \
+  -o jsonpath='{.data.password}' | base64 --decode)
+```
 
-    Operator Pattern: Moving from manual StatefulSets to Operators reduces operational overhead and human error.
+It is passed into the pod via `env PGPASSWORD=` on each `kubectl exec` call — no `.pgpass` file or manual export needed.
 
-    Observability: Integrated liveness/readiness probes are essential for the API server to route traffic only to healthy nodes.
+---
 
-    Data Integrity: Synchronous vs. Asynchronous replication trade-offs were considered to balance performance and durability.
+## Example output
+
+```
+CNPG Chaos Test — chaos-6878
+  cluster: my-pg-cluster  namespace: default
+  →  Primary: my-pg-cluster-2
+  →  Replicas: my-pg-cluster-1 my-pg-cluster-3
+
+Step 1 — Ensure chaos_test table exists
+  ✓  Table ready
+
+Step 2 — Write test row to primary (my-pg-cluster-2)
+  ✓  Row inserted: run_id=chaos-6878
+
+Step 3 — Verify replication to all replicas
+  ✓  Replica my-pg-cluster-1 has the row (1 row)
+  ✓  Replica my-pg-cluster-3 has the row (1 row)
+
+Step 4 — Kill primary pod (my-pg-cluster-2)
+  ✓  Pod my-pg-cluster-2 deleted
+
+Step 5 — Waiting for new primary election (timeout: 120s)
+  →  Polling every 2s…
+  ✓  New primary elected: my-pg-cluster-1  (failover in 8340ms)
+
+Step 6 — Data integrity on new primary (my-pg-cluster-1)
+  ✓  Data intact on new primary (1 row for chaos-6878)
+
+Step 7 — Cluster topology after failover
+NAME               READY   STATUS    ROLE
+my-pg-cluster-1    1/1     Running   primary
+my-pg-cluster-2    1/1     Running   replica
+my-pg-cluster-3    1/1     Running   replica
+
+Summary
+  ✓  Run ID:         chaos-6878
+  ✓  Old primary:    my-pg-cluster-2 (deleted)
+  ✓  New primary:    my-pg-cluster-1
+  ✓  Failover time:  8340ms
+
+All chaos checks PASSED
+```
+
+---
+
+## Notes
+
+- The replication check waits 1 second before reading from replicas to account for streaming replication lag on Minikube. Increase this if you see intermittent replica failures.
+- The `chaos_test` table is created with `IF NOT EXISTS` — repeated runs are safe and accumulate rows.
+- Failover time is measured from pod deletion to the moment a new pod acquires the `primary` role label.
