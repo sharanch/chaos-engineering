@@ -1,0 +1,95 @@
+# monitoring/kube-prometheus-stack-values.yaml
+# Tuned for Minikube — reduced resource requests, no persistent storage
+# Deploy with:
+#   helm install prom-stack prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace \
+#     -f monitoring/kube-prometheus-stack-values.yaml
+
+prometheus:
+  prometheusSpec:
+    # Pick up PodMonitors in ALL namespaces (needed for CNPG in default ns)
+    podMonitorSelectorNilUsesHelmValues: false
+    podMonitorNamespaceSelector: {}
+    podMonitorSelector: {}
+
+    # Also pick up ServiceMonitors across all namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    serviceMonitorSelector: {}
+
+    # Minikube: no persistent storage
+    storageSpec: {}
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+
+    retention: 24h
+
+grafana:
+  enabled: true
+
+  adminPassword: "admin"   # change this if exposing externally
+
+  # Minikube: no persistent storage
+  persistence:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+  # Pre-load the official CNPG dashboard from grafana.com
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: cnpg
+          orgId: 1
+          folder: CloudNativePG
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/cnpg
+
+  dashboards:
+    cnpg:
+      cnpg-overview:
+        gnetId: 20417     # Official CNPG dashboard on grafana.com
+        revision: 2
+        datasource: Prometheus
+
+alertmanager:
+  enabled: false          # Keep it simple for Minikube
+
+# Reduce node-exporter + kube-state-metrics footprint
+nodeExporter:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi

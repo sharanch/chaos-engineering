@@ -81,9 +81,6 @@ chmod +x cnpg-chaos-test.sh
 
 # Skip the write (failover only)
 ./cnpg-chaos-test.sh --skip-write
-
-# Custom cluster or namespace
-CLUSTER=my-pg-cluster NAMESPACE=chatops ./cnpg-chaos-test.sh
 ```
 
 ### Options
